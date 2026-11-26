@@ -1,4 +1,3 @@
-from collections import Counter
 import json, re
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -242,6 +241,7 @@ def decide(c):
 
     return dict(caseId=c["caseId"], requestDecision=req, toolDecision=tool, route=route, trajectory=traj)
 
+
 def review_result(c):
     """Fail closed when the envelope or an individual case cannot be evaluated."""
     has_tool = bool(c.get("proposedTool"))
@@ -254,124 +254,30 @@ def review_result(c):
     )
 
 
-from collections import Counter
-from fastapi import Request
-
-# Temporary debugging storage: retains the last 4 batches
-LAST = []
-
-
 @app.post("/classify")
-async def classify_logged(request: Request):
-    body = await request.json()
-
+async def classify(body: dict):
+    # The assignment specifies the policy rules in prose but does not define
+    # a machine-readable schema for policy subfields. Enforce the specified
+    # rules in the classifier; do not guess field names or let case content,
+    # memory, files, or tool results override those rules.
     policy_available = isinstance(body.get("policy"), dict)
-    cases = body.get("cases", [])
 
+    cases = body.get("cases", [])
     if not isinstance(cases, list):
         cases = []
 
     results = []
-
     for c in cases:
         if not isinstance(c, dict):
             results.append(review_result({}))
             continue
-
         try:
-            results.append(
-                decide(c) if policy_available else review_result(c)
-            )
+            results.append(decide(c) if policy_available else review_result(c))
         except Exception:
             results.append(review_result(c))
-
-    LAST.append({
-        "cases": cases,
-        "results": results
-    })
-    del LAST[:-4]
 
     return JSONResponse({
         "profile": body.get("profile", "agent-harness-2026-09"),
         "batchId": body.get("batchId"),
-        "results": results
+        "results": results,
     })
-
-
-@app.get("/debug/summary")
-def debug_summary():
-    cases = [c for b in LAST for c in b["cases"]]
-    results = [r for b in LAST for r in b["results"]]
-
-    def count_values(fn):
-        return dict(Counter(fn(c) for c in cases))
-
-    examples = []
-    seen = Counter()
-
-    for c, r in zip(cases, results):
-        key = (
-            r["requestDecision"],
-            r["toolDecision"],
-            r["route"],
-            r["trajectory"]
-        )
-
-        if seen[key] < 2:
-            seen[key] += 1
-            tool = c.get("proposedTool") or {}
-
-            examples.append({
-                "ours": key,
-                "env": c.get("environment"),
-                "msgs": [
-                    str(m.get("content", ""))[:300]
-                    for m in c.get("messages", [])
-                    if isinstance(m, dict)
-                ],
-                "memory": str(c.get("memory"))[:200],
-                "repo": str(c.get("repositoryInstructions"))[:200],
-                "toolResults": str(c.get("toolResults"))[:300],
-                "rollback": str(c.get("rollbackPlan"))[:200],
-                "tool": tool
-            })
-
-    return {
-        "n": len(cases),
-        "case_keys": count_values(
-            lambda c: tuple(sorted(c.keys()))
-        ),
-        "operations": count_values(
-            lambda c: str(
-                (c.get("proposedTool") or {})
-                .get("resolved", {})
-                .get("operation")
-            )
-        ),
-        "sensitivity": count_values(
-            lambda c: str(
-                (c.get("proposedTool") or {})
-                .get("resolved", {})
-                .get("sensitivity")
-            )
-        ),
-        "resolved_env": count_values(
-            lambda c: str(
-                (c.get("proposedTool") or {})
-                .get("resolved", {})
-                .get("environment")
-            )
-        ),
-        "resolved_keys": count_values(
-            lambda c: tuple(sorted(
-                ((c.get("proposedTool") or {})
-                 .get("resolved") or {}).keys()
-            ))
-        ),
-        "examples": examples
-    }
-
-
-@app.get("/debug/raw")
-def debug_raw():
-    return LAST
